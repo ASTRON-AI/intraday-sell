@@ -12,6 +12,9 @@ import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import StandardScaler
+from matplotlib import gridspec
+import matplotlib.ticker as mtick
+import math
 # 設定中文字型
 plt.rcParams['font.sans-serif'] = ['Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
@@ -497,6 +500,9 @@ def prepare_training_data(start_date: str, end_date: str) -> pd.DataFrame:
     # 計算融資融券特徵
     margin_features = calculate_margin_features(margin_data)
     
+    #周轉率
+    #turnover_feature = calculate_turnover_rate(df)
+
     # 確保所有要合併的DataFrame都有相同的日期格式
     print("Date types:")
     print("df date type:", df['date'].dtype)
@@ -504,6 +510,7 @@ def prepare_training_data(start_date: str, end_date: str) -> pd.DataFrame:
     print("foreign_features date type:", foreign_features['date'].dtype)
     
     # 合併特徵
+    #df = pd.merge(df, turnover_feature, on=['date', 'stock_id'], how='left')
     df = pd.merge(df, margin_features, on=['date', 'stock_id'], how='left')
     df = pd.merge(df, foreign_features, on=['date', 'stock_id'], how='left')
     
@@ -604,30 +611,7 @@ def train_model(X_train_scaled, X_test_scaled, y_train, y_test,feature_columns):
         'min_child_weight': 3,
         'gamma': 0.1
     }
-    
-    # # 訓練模型
-    # model = xgb.XGBClassifier(**params)
-    
-    # # 使用eval_set進行訓練
-    # eval_set = [(X_train_scaled, y_train), (X_test_scaled, y_test)]
-    # model.fit(
-    #     X_train_scaled, 
-    #     y_train,
-    #     eval_set=eval_set,
-    #     verbose=True
-    # )
-    
-    # # 計算並顯示特徵重要性
-    # feature_importance = pd.DataFrame({
-    #     'feature': feature_columns,
-    #     'importance': model.feature_importances_
-    # })
-    # feature_importance = feature_importance.sort_values('importance', ascending=False)
-    
-    # print("\n前10個最重要的特徵:")
-    # print(feature_importance.head(10))
-    
-    # return model, X_train_scaled, X_test_scaled, y_train, y_test, feature_columns
+
     # 訓練模型
     model = xgb.XGBClassifier(**params)
     
@@ -720,70 +704,147 @@ def calculate_equity_curve(predictions, y_true, df, start_idx, end_idx):
     print(f"總獲利: {total_profit:.2f}")
 
     return daily_profits
-# def calculate_equity_curve(predictions, y_true, df, start_idx, end_idx):
-#     """
-#     計算權益曲線，使用絕對損益
-#     """
-#     # 建立交易記錄
-#     trades = pd.DataFrame({
-#         'date': df['date'].iloc[start_idx:end_idx].values,
-#         'stock_id': df['stock_id'].iloc[start_idx:end_idx].values,
-#         'predicted': predictions,
-#         'actual': y_true,
-#         'profit': df['profit'].iloc[start_idx:end_idx].values
-#     })
-    
-#     # 先初始化交易損益
-#     trades['trade_profit'] = 0.0
-    
-#     # 只處理有交易的記錄
-#     trade_mask = trades['predicted'] == 1
-    
-#     # 計算考慮交易成本後的損益
-#     trades.loc[trade_mask & (trades['profit'] > 0), 'trade_profit'] = trades['profit'] * 0.998  # 獲利時的手續費
-#     trades.loc[trade_mask & (trades['profit'] <= 0), 'trade_profit'] = trades['profit'] * 1.002  # 虧損時的手續費
-    
-#     # 計算每日損益和累積獲利
-#     daily_profits = trades.groupby('date').agg({
-#         'trade_profit': 'sum',
-#         'predicted': 'sum'  # 計算每日交易次數
-#     }).reset_index()
-#     daily_profits['cumulative_profit'] = daily_profits['trade_profit'].cumsum()
-    
-#     # 統計資訊
-#     total_trades = (trades['predicted'] == 1).sum()
-#     winning_trades = ((trades['predicted'] == 1) & (trades['trade_profit'] > 0)).sum()
-#     losing_trades = ((trades['predicted'] == 1) & (trades['trade_profit'] < 0)).sum()
-#     win_rate = winning_trades / total_trades if total_trades > 0 else 0
-#     total_profit = trades['trade_profit'].sum()
-    
-#     print(f"\n交易統計:")
-#     print(f"總交易次數: {total_trades}")
-#     print(f"獲利次數: {winning_trades}")
-#     print(f"虧損次數: {losing_trades}")
-#     print(f"勝率: {win_rate:.2%}")
-#     print(f"總獲利: {total_profit:.2f}")
-    
-#     return daily_profits
-def calculate_drawdown(cumulative_profit):
-    """
-    計算回撤和最大回撤
-    """
-    max_cumulative = np.maximum.accumulate(cumulative_profit)
-    drawdown = cumulative_profit - max_cumulative
-    drawdown_percentage = drawdown / max_cumulative
-    max_drawdown = drawdown_percentage.min()
-    return drawdown, max_drawdown
 
-def calculate_sharpe_ratio(daily_returns, risk_free_rate=0):
-    """
-    計算夏普比率
-    """
-    excess_returns = daily_returns - risk_free_rate
-    sharpe_ratio = np.mean(excess_returns) / np.std(excess_returns)
-    return sharpe_ratio
 
+def equity_plot(data, Strategy, initial_cash):
+    """
+    繪製權益曲線和回撤圖，使用修正後的夏普比率計算
+    
+    Parameters:
+    -----------
+    data : pd.DataFrame
+        包含日期和每日獲利的DataFrame
+    Strategy : str
+        策略名稱
+    initial_cash : float
+        初始資金
+    """
+    import pandas as pd
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.gridspec as gridspec
+    import matplotlib.ticker as mtick
+    
+    # 確保日期索引
+    data.index = pd.to_datetime(data.index)
+    
+    # 計算每日權益
+    equity_series = initial_cash + data['Return'].cumsum()
+    
+    # 修正：計算每日報酬率
+    # 使用當日獲利除以前一日權益，以計算實際的日報酬率
+    previous_equity = equity_series.shift(1)
+    previous_equity.iloc[0] = initial_cash  # 設定第一天的前一日權益為初始資金
+    daily_returns = data['Return'] / previous_equity
+    
+    # 計算年化報酬率
+    total_days = len(daily_returns)
+    trading_days_per_year = 252
+    total_profit = data['Return'].sum()
+    final_equity = equity_series.iloc[-1]
+    annual_return = (final_equity / initial_cash) ** (trading_days_per_year / total_days) - 1
+    
+    # 修正：計算夏普比率
+    risk_free_rate = 0.02  # 假設無風險利率為2%
+    excess_daily_returns = daily_returns - risk_free_rate/trading_days_per_year
+    annualized_excess_return = excess_daily_returns.mean() * trading_days_per_year
+    annualized_std = daily_returns.std() * np.sqrt(trading_days_per_year)
+    sharpe_ratio = annualized_excess_return / annualized_std if annualized_std != 0 else 0
+    
+    # 修正：計算索提諾比率
+    downside_returns = daily_returns[daily_returns < risk_free_rate/trading_days_per_year]
+    downside_std = downside_returns.std() * np.sqrt(trading_days_per_year)
+    sortino_ratio = annualized_excess_return / downside_std if downside_std != 0 else 0
+    
+    # 計算最大回撤
+    cummax = equity_series.cummax()
+    drawdown = (cummax - equity_series) / cummax
+    max_drawdown = drawdown.max() * 100
+    
+    # 找出新高點
+    new_highs = equity_series[equity_series == equity_series.cummax()]
+    
+    # 繪圖
+    fig = plt.figure(figsize=(16, 9))
+    spec = gridspec.GridSpec(ncols=1, nrows=2, height_ratios=[3, 1])
+    
+    # 上半部：權益曲線
+    ax0 = fig.add_subplot(spec[0])
+    ax0.plot(equity_series.index, equity_series.values, label='Equity Curve', color='blue')
+    ax0.scatter(new_highs.index, new_highs.values,
+               c='#02ff0f', s=50, alpha=1, edgecolor='green', 
+               label='New Equity High')
+    
+    # 設置y軸為金額格式
+    def format_amount(x, p):
+        if x >= 1e8:
+            return f'{x/1e8:.1f}億'
+        elif x >= 1e4:
+            return f'{x/1e4:.1f}萬'
+        else:
+            return f'{x:.0f}'
+    
+    ax0.yaxis.set_major_formatter(plt.FuncFormatter(format_amount))
+    ax0.grid(True, alpha=0.3)
+    ax0.legend(loc='upper left')
+    
+    # 添加績效指標
+    avg_daily_return = daily_returns.mean()
+    performance_text = (
+        f'{Strategy} Performance Metrics\n'
+        f'總獲利: {total_profit:,.0f}\n'
+        f'年化報酬率: {annual_return:.2%}\n'
+        f'夏普比率: {sharpe_ratio:.2f}\n'
+        f'索提諾比率: {sortino_ratio:.2f}\n'
+        f'最大回撤: {max_drawdown:.2f}%\n'
+        f'平均日報酬率: {avg_daily_return:.2%}'
+    )
+    ax0.set_title(performance_text, fontsize=12, pad=20)
+    
+    # 下半部：回撤圖
+    ax1 = fig.add_subplot(spec[1])
+    ax1.fill_between(drawdown.index, drawdown * 100, 0, color='red', alpha=0.5, label='Drawdown')
+    ax1.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='lower left')
+    ax1.set_ylabel('Drawdown %')
+    
+    plt.tight_layout()
+    plt.savefig('./analysis_results/equity_curve.png', bbox_inches='tight', dpi=300)
+    plt.close()
+    
+    # 打印詳細的績效指標
+    print("\n策略績效統計:")
+    print(f"總獲利: {total_profit:,.0f}")
+    print(f"年化報酬率: {annual_return:.2%}")
+    print(f"夏普比率: {sharpe_ratio:.2f}")
+    print(f"索提諾比率: {sortino_ratio:.2f}")
+    print(f"最大回撤: {max_drawdown:.2f}%")
+    print(f"平均日報酬率: {avg_daily_return:.4%}")
+    
+    # 額外的統計信息
+    winning_days = len(daily_returns[daily_returns > 0])
+    losing_days = len(daily_returns[daily_returns < 0])
+    win_rate = winning_days / len(daily_returns)
+    
+    print("\n其他統計:")
+    print(f"獲利天數: {winning_days}")
+    print(f"虧損天數: {losing_days}")
+    print(f"勝率: {win_rate:.2%}")
+    print(f"日報酬率標準差: {daily_returns.std():.4%}")
+    
+    return {
+        'total_profit': total_profit,
+        'annual_return': annual_return,
+        'sharpe_ratio': sharpe_ratio,
+        'sortino_ratio': sortino_ratio,
+        'max_drawdown': max_drawdown,
+        'avg_daily_return': avg_daily_return,
+        'win_rate': win_rate
+    }
 def main():
+    # 儲存結果
+    create_folders()
     # 設定分析期間
     start_date = '2023-01-01'
     end_date = '2024-12-31'
@@ -832,11 +893,36 @@ def main():
     
     # 訓練模型
     model = train_model(X_train_scaled, X_test_scaled, y_train, y_test, feature_columns)
-    
+    # 儲存訓練和測試資料
+    train_data.to_csv('./analysis_results/train_data.csv', index=False)
+    test_data.to_csv('./analysis_results/test_data.csv', index=False)
     # 獲取訓練集預測結果
     train_pred = model.predict(X_train_scaled)
+    train_proba = model.predict_proba(X_train_scaled)[:, 1]
     train_equity = calculate_equity_curve(train_pred, y_train, train_data, 0, len(train_data))
+    # 儲存訓練集預測結果
+    pd.DataFrame({
+        'date': train_data['date'],
+        'stock_id': train_data['stock_id'],
+        'predicted': train_pred,
+        'probability': train_proba,
+        'actual': y_train,
+        'profit': train_data['profit']
+    }).to_csv('./analysis_results/train_predictions.csv', index=False)
     
+    # 獲取測試集預測結果和機率
+    test_pred = model.predict(X_test_scaled)
+    test_proba = model.predict_proba(X_test_scaled)[:, 1]
+    
+    # 儲存測試集預測結果
+    pd.DataFrame({
+        'date': test_data['date'],
+        'stock_id': test_data['stock_id'],
+        'predicted': test_pred,
+        'probability': test_proba,
+        'actual': y_test,
+        'profit': test_data['profit']
+    }).to_csv('./analysis_results/test_predictions.csv', index=False)
     # 處理測試集 - 選擇每日前10檔股票
     filtered_test_data = pd.DataFrame()
     dates = test_data['date'].unique()
@@ -846,7 +932,7 @@ def main():
         daily_data = test_data[test_data['date'] == date].copy()
         
         # 獲取當日不可當沖的股票
-        no_intraday_file = f'./output/{date.strftime("%Y%m%d")}_no_intraday.csv'
+        no_intraday_file = f'./output1231/{date.strftime("%Y%m%d")}_no_intraday.csv'
         try:
             no_intraday_df = pd.read_csv(no_intraday_file)
             no_intraday_stocks = set(no_intraday_df['stock_id'].astype(str))
@@ -863,17 +949,34 @@ def main():
         daily_data['pred_probability'] = daily_proba
         
         # 選擇前10檔股票
-        top_10_stocks = daily_data.nlargest(10, 'pred_probability')
+        top_10_stocks = daily_data.nlargest(30, 'pred_probability')
         filtered_test_data = pd.concat([filtered_test_data, top_10_stocks])
     
     # 重新準備測試集特徵
     X_test_filtered = process_features(filtered_test_data[feature_columns])
     X_test_filtered_scaled = scaler.transform(X_test_filtered)
+    # 儲存模型
+    print("儲存模型...")
+    if not os.path.exists('./models'):
+        os.makedirs('./models')
     
+    # 儲存 XGBoost 模型
+    model.save_model('./models/trained_model.json')
+    
+    # 儲存 StandardScaler 參數
+    scaler_params = {
+        'mean': scaler.mean_,
+        'scale': scaler.scale_,
+        'var': scaler.var_,
+        'n_samples_seen': scaler.n_samples_seen_
+    }
+    np.savez('./models/scaler_params.npz', **scaler_params)
+    
+    print("模型和標準化參數已儲存至 ./models 目錄")
     # 獲取過濾後的測試集預測結果
     test_pred = model.predict(X_test_filtered_scaled)
     
-    # 計算權益曲線
+   # 計算權益曲線
     test_equity = calculate_equity_curve(
         test_pred, 
         filtered_test_data['label'], 
@@ -882,57 +985,22 @@ def main():
         len(filtered_test_data)
     )
     
-    # 將測試集的累積獲利加上訓練集的最終獲利
-    test_equity['cumulative_profit'] = test_equity['cumulative_profit'] + train_equity['cumulative_profit'].iloc[-1]
-    
-    # 計算每日回報率
-    daily_returns = test_equity['trade_profit']
-    
-    # 計算 Drawdown 和最大回撤
-    drawdown, max_drawdown = calculate_drawdown(test_equity['cumulative_profit'])
-    test_equity['drawdown'] = drawdown
-    
-    # 計算 Sharpe Ratio
-    sharpe_ratio = calculate_sharpe_ratio(daily_returns)
-    
-    # 計算總報酬率
-    total_return = test_equity['cumulative_profit'].iloc[-1]
-    
-    # 繪製權益曲線和回撤
-    plt.figure(figsize=(15, 10))
-    
-    # 累積獲利曲線
-    plt.subplot(2, 1, 1)
-    plt.plot(train_equity['date'], train_equity['cumulative_profit'], label='Training', color='blue')
-    plt.plot(test_equity['date'], test_equity['cumulative_profit'], label='Testing (Top 10)', color='red')
-    plt.title('當沖策略權益曲線 (測試期每日前10檔)')
-    plt.xlabel('日期')
-    plt.ylabel('累積獲利')
-    plt.legend()
-    plt.grid(True)
-    
-    # Drawdown 曲線
-    plt.subplot(2, 1, 2)
-    plt.plot(test_equity['date'], test_equity['drawdown'], label='Drawdown', color='orange')
-    plt.title('Drawdown')
-    plt.xlabel('日期')
-    plt.ylabel('回撤')
-    plt.legend()
-    plt.grid(True)
-    
-    # 標註統計數值
-    plt.figtext(0.15, 0.02, f'Total Return: {total_return:.2f}', fontsize=12)
-    plt.figtext(0.35, 0.02, f'Max Drawdown: {max_drawdown:.2%}', fontsize=12)
-    plt.figtext(0.55, 0.02, f'Sharpe Ratio: {sharpe_ratio:.2f}', fontsize=12)
-    
-    # 格式化x軸日期
-    plt.gcf().autofmt_xdate()
-    
-    # 儲存結果
-    create_folders()
-    plt.savefig('./analysis_results/equity_curve_top10.png')
-    
-    # 儲存每日選股結果
+    equity_data = pd.DataFrame({
+    'Return': test_equity['trade_profit'].values
+    }, index=pd.to_datetime(test_equity['date']))
+
+    performance_metrics = equity_plot(
+        data=equity_data * 1000,
+        Strategy='當沖策略',
+        initial_cash=10000000
+    )
+    # 打印績效指標
+    print("\n策略績效指標：")
+    print(f"年化報酬率: {performance_metrics['annual_return']:.2%}")
+    print(f"夏普比率: {performance_metrics['sharpe_ratio']:.2f}")
+    print(f"索提諾比率: {performance_metrics['sortino_ratio']:.2f}")
+    print(f"最大回撤: {performance_metrics['max_drawdown']:.2f}%")
+        # 儲存每日選股結果
     filtered_test_data.to_csv('./analysis_results/daily_top10_stocks.csv', index=False)
     
     # 顯示每日選股數量統計
